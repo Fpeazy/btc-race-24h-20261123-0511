@@ -7,10 +7,11 @@
 // (399 change points, 5% steps, ends flat at bar 1434). Mode is chosen
 // from the BAR TIMESTAMP (data the harness sends), never a wall clock.
 //
-// RACE MODE: washout-bounce buyer (Lesson 1, winners study 23 Nov):
-//   the normal entry buys a genuine oversold extreme — pullback >= 60 bps
-//   from the 120-bar high, %B in [-0.20, 0.30] (at/below the lower band),
-//   on a GREEN bar (bounce confirmation), drift240 >= 0, ATR60 <= 13.
+// RACE MODE: washout-bounce buyer (Lesson 1, winners study 23 Nov;
+//   round 3, largest-PnL test 23 Nov): the normal entry buys a genuine
+//   oversold extreme — pullback >= 50 bps from the 120-bar high,
+//   %B in [-0.10, 0.35] (at/below the lower band), on a GREEN bar
+//   (bounce confirmation), drift240 >= 0, ATR60 <= 13.
 //   Winners of both prior races won on 2-4 washout trades (+$6-11/trade);
 //   the old >= 30 bps red-bar pullback entry lost -$4.84/roundtrip on dev.
 //   R9 base + every DNF fix from the 19 Nov investigation:
@@ -25,10 +26,13 @@
 //   - DOWNTREND MODE: when drift240 < 0 the dip-buyer is blocked, so a
 //     recovery entry fires instead (pullback >= 30 bps, GREEN bar,
 //     %B in [0.30, 0.70], slope120 < 0, ATR60 <= 13, half size, fast
-//     exits TP+40 / stop-15 / time-60). Flagged DOWNTREND_ENABLED.
+//     exits TP+150 / stop-25 / time-120). Flagged DOWNTREND_ENABLED.
 //   - ACTIVITY GUARD: if 0 trades by bar 800, take the FIRST setup with
 //     pullback >= 20 bps and ATR60 <= 10 (no drift floor), half size,
 //     fires at most once, no new entries after bar 1380, fast exits.
+//     Round 3: the guard may ALSO fire after a normal trade closed, so a
+//     washout day can pay twice (normal + guard); fast exits are now
+//     TP +150 / stop -25 / time 120 (the +40 TP capped guard wins at ~$1.2).
 //   - O(1) incremental indicators only; validate once at the top; early
 //     exit before indicator work when no order is possible; no sync I/O,
 //     no sync I/O, no wall clock, no unseeded randomness (deterministic:
@@ -38,17 +42,18 @@
 // ratcheting to 40 bps once +50 bps in profit, time exit 120 bars,
 // bail -20 bps within 20 bars, disaster stop -250 bps, drawdown breaker
 // 5% (no new entries) / 8% (flatten). Fast entries (downtrend + guard):
-// full exit at TP +40 bps / stop -15 bps / time 60 bars.
+// full exit at TP +150 bps / stop -25 bps / time 120 bars.
 //
 // Honest caveats: the dev schedule earns $0 in the race window — it only
 // opens the gate. The prize is decided by the race mode on an unseen day.
 // The race mode is designed to lose small and stay alive, not to win big.
-// Fresh OOS (14 x 24h slices, 9-23 Nov): washout entry -$23.52 total
-// (14 roundtrips, 1/slice, mean -$1.68/trade) vs old pullback entry
-// -$40.45 (23 roundtrips); dev race-only -$0.53 vs -$14.53. Still
+// Fresh OOS (21 x 24h windows: 14 in-sample 9-23 Nov + 7 held-out 2-9 Nov):
+// round 3 (c2) -$27.37 total (25 roundtrips, mean -$1.09/trade) vs rev 2
+// -$36.78; held-out -$3.21 vs -$13.26; best single day +$8.87 (held-out
+// d3: normal +$2.43 AND guard +$6.44 on the same washout day). Still
 // negative on fresh windows — the prize hinges on the race day being a
-// washout day. Fallback commit 2565206b (old entry) is preserved on
-// branch hasil-pertama-2565206b.
+// washout day. Fallback commit 2565206b (first result) is preserved on
+// branch hasil-pertama-2565206b; rev 2 (18cdec7) is the parent of this commit.
 
 import { runBars, type Bar, type BarsState, type BuyInput, type SellInput } from './vendor/makefun-bars.ts';
 
@@ -155,9 +160,9 @@ const BWCHG10_ABS_MIN = 10; // bandwidth must have MOVED >= 10% over 10 bars
 const BW_EXPAND = 1.1; // expanding: bandwidth > 110% of its 120-bar mean
 const SQUEEZE_PCT = 0.2; // squeeze: bandwidth at/below its 20th percentile
 const TRAIL_HIGH_LOOK = 120; // bars for the trailing high
-const PULLBACK_BPS = 60; // washout (Lesson 1): >= 60 bps below the trailing high
-const PCTB_MIN = -0.2; // washout: %B at or above -0.20 (below lower band = oversold)
-const PCTB_MAX = 0.3; // washout: %B at or below 0.30
+const PULLBACK_BPS = 50; // round 3: looser washout >= 50 bps below the trailing high
+const PCTB_MIN = -0.1; // round 3: %B at or above -0.10 (looser washout)
+const PCTB_MAX = 0.35; // round 3: %B at or below 0.35
 const TREND_GAP_BPS = 2; // EMA8-EMA21 gap that counts as trending
 const MIN_BAR = 60; // bars of history before the first entry is allowed
 const TRAIL_BPS = 80; // exit: 80 bps below the highest close since entry
@@ -188,9 +193,9 @@ const DOWNTREND_ENABLED = false; // DISABLED at build time: fresh 7d OOS
 // flag is off, so drift < 0 simply blocks new longs (flat is a position).
 const DT_PCTB_MIN = 0.3; // downtrend entry: %B at or above 0.30
 const DT_PCTB_MAX = 0.7; // downtrend entry: %B at or below 0.70
-const DT_TP_BPS = 40; // downtrend/guard fast exit: TP +40 bps (full)
-const DT_STOP_BPS = 15; // downtrend/guard fast exit: stop -15 bps (full)
-const DT_TIME_BARS = 60; // downtrend/guard fast exit: time 60 bars
+const DT_TP_BPS = 150; // round 3: guard fast exit TP +150 bps (full)
+const DT_STOP_BPS = 25; // round 3: guard fast exit stop -25 bps (full)
+const DT_TIME_BARS = 120; // round 3: guard fast exit time 120 bars
 const GUARD_AFTER = 800; // activity guard arms at this bar
 const GUARD_PB_BPS = 20; // guard: pullback >= 20 bps
 const GUARD_ATR_BPS = 10; // guard: ATR60 <= 10 bps
@@ -513,10 +518,10 @@ function raceTrade(state: BarsState, seq: number, close: number, open: number, d
   // ---- ACTIVITY GUARD (fires at most once, race mode only): if no trade
   // has fired by bar 800, take the FIRST setup with pullback >= 20 bps
   // and ATR60 <= 10 — no drift floor, no higher-low, no range gate —
-  // at half size, with fast exits.
+  // at half size, with fast exits. Round 3: it may also fire after a
+  // normal trade closed, so one washout day can pay twice.
   if (
     !guardUsed &&
-    tradesOpened === 0 &&
     seq >= GUARD_AFTER &&
     seq < NO_ENTRY_AFTER &&
     dd <= CB_BLOCK_DD &&
