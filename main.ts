@@ -34,6 +34,7 @@
 //     washout day can pay twice (normal + guard); fast exits are now
 //     TP +150 / stop -25 / time 120 (the +40 TP capped guard wins at ~$1.2).
 //     Round 4: guard fast exit is a trailing ratchet — TP cap +250, exit on
+//     Round 5: TP cap +250 -> +400 (the cap was the binding exit on the held-out d3 winner: +$11.94 -> +$14.06).
 //     a 60 bps retrace once +100 in profit, time stays 120 (the 180-bar
 //     extension bled on losers); normal trail widened to 120/60 so the
 //     second half rides a trending washout day.
@@ -46,7 +47,7 @@
 // (round 4) ratcheting to 60 bps once +50 bps in profit, time exit 120 bars,
 // bail -20 bps within 20 bars, disaster stop -250 bps, drawdown breaker
 // 5% (no new entries) / 8% (flatten). Fast entries (downtrend + guard):
-// full exit at TP +250 bps (round 4) / stop -25 bps / time 120 bars.
+// full exit at TP +400 bps (round 5) / stop -25 bps / time 120 bars.
 // Guard trades additionally exit on a 60 bps retrace from the trail high
 // once +100 bps in profit (round 4 ratchet: locks in gains, lets a
 // trending washout day pay).
@@ -201,7 +202,7 @@ const DOWNTREND_ENABLED = false; // DISABLED at build time: fresh 7d OOS
 // flag is off, so drift < 0 simply blocks new longs (flat is a position).
 const DT_PCTB_MIN = 0.3; // downtrend entry: %B at or above 0.30
 const DT_PCTB_MAX = 0.7; // downtrend entry: %B at or below 0.70
-const DT_TP_BPS = 250; // round 4: guard ratchet TP cap +250 bps (full)
+const DT_TP_BPS = 400; // round 5: guard ratchet TP cap +400 bps (full)
 const DT_STOP_BPS = 25; // round 3: guard fast exit stop -25 bps (full)
 const DT_TIME_BARS = 120; // round 3: guard fast exit time 120 bars
 const GUARD_AFTER = 800; // activity guard arms at this bar
@@ -532,7 +533,7 @@ function raceTrade(state: BarsState, seq: number, close: number, open: number, d
   // and ATR60 <= 10 — no drift floor, no higher-low, no range gate —
   // at half size, with fast exits. Round 3: it may also fire after a
   // normal trade closed, so one washout day can pay twice. Round 4: the
-  // guard exit is a trailing ratchet (TP cap +250, 60 bps retrace once
+  // guard exit is a trailing ratchet (TP cap +400, 60 bps retrace once
   // +100 in profit, time 120) — it locks in gains on trending days.
   if (
     !guardUsed &&
