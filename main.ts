@@ -7,8 +7,13 @@
 // (399 change points, 5% steps, ends flat at bar 1434). Mode is chosen
 // from the BAR TIMESTAMP (data the harness sends), never a wall clock.
 //
-// RACE MODE: selective dip-buyer on the R9 base (validated on the prior
-// race) with every DNF fix from the 19 Nov investigation:
+// RACE MODE: washout-bounce buyer (Lesson 1, winners study 23 Nov):
+//   the normal entry buys a genuine oversold extreme — pullback >= 60 bps
+//   from the 120-bar high, %B in [-0.20, 0.30] (at/below the lower band),
+//   on a GREEN bar (bounce confirmation), drift240 >= 0, ATR60 <= 13.
+//   Winners of both prior races won on 2-4 washout trades (+$6-11/trade);
+//   the old >= 30 bps red-bar pullback entry lost -$4.84/roundtrip on dev.
+//   R9 base + every DNF fix from the 19 Nov investigation:
 //   - the ENTIRE onBatch body is in try/catch; any error replies [].
 //   - every bar is validated (close/open/high/low digits-only strings,
 //     t finite) BEFORE any use; a parse helper returns null, never throws.
@@ -37,9 +42,13 @@
 //
 // Honest caveats: the dev schedule earns $0 in the race window — it only
 // opens the gate. The prize is decided by the race mode on an unseen day.
-// The race mode is designed to lose small and trade often on small edges,
-// not to win big. 7-day OOS (18 Nov, stale): every config negative;
-// drift-0 the least bad (-$5.89/7d). Fresh OOS is run at build time.
+// The race mode is designed to lose small and stay alive, not to win big.
+// Fresh OOS (14 x 24h slices, 9-23 Nov): washout entry -$23.52 total
+// (14 roundtrips, 1/slice, mean -$1.68/trade) vs old pullback entry
+// -$40.45 (23 roundtrips); dev race-only -$0.53 vs -$14.53. Still
+// negative on fresh windows — the prize hinges on the race day being a
+// washout day. Fallback commit 2565206b (old entry) is preserved on
+// branch hasil-pertama-2565206b.
 
 import { runBars, type Bar, type BarsState, type BuyInput, type SellInput } from './vendor/makefun-bars.ts';
 
@@ -146,9 +155,9 @@ const BWCHG10_ABS_MIN = 10; // bandwidth must have MOVED >= 10% over 10 bars
 const BW_EXPAND = 1.1; // expanding: bandwidth > 110% of its 120-bar mean
 const SQUEEZE_PCT = 0.2; // squeeze: bandwidth at/below its 20th percentile
 const TRAIL_HIGH_LOOK = 120; // bars for the trailing high
-const PULLBACK_BPS = 30; // entry: >= 30 bps below the trailing high
-const PCTB_MIN = 0.1; // entry: %B at or above 0.10 (never below lower band)
-const PCTB_MAX = 0.5; // entry: %B at or below 0.5 (lower half of bands)
+const PULLBACK_BPS = 60; // washout (Lesson 1): >= 60 bps below the trailing high
+const PCTB_MIN = -0.2; // washout: %B at or above -0.20 (below lower band = oversold)
+const PCTB_MAX = 0.3; // washout: %B at or below 0.30
 const TREND_GAP_BPS = 2; // EMA8-EMA21 gap that counts as trending
 const MIN_BAR = 60; // bars of history before the first entry is allowed
 const TRAIL_BPS = 80; // exit: 80 bps below the highest close since entry
@@ -455,7 +464,7 @@ function raceTrade(state: BarsState, seq: number, close: number, open: number, d
     noteGate('drift-down');
   }
 
-  // ---- NORMAL ENTRY: R9 dip-buyer (regime RANGE/TREND only). ----
+  // ---- NORMAL ENTRY: washout-bounce buyer (Lesson 1: oversold extreme + green bounce). ----
   // Drift >= 0 (or undefined before 240 bars) is required here; the
   // downtrend branch above already handled drift < 0.
   if (drift === null || drift >= DRIFT_BLOCK_BPS) {
@@ -476,8 +485,8 @@ function raceTrade(state: BarsState, seq: number, close: number, open: number, d
     } else if (bwchg10 !== null && Math.abs(bwchg10) < BWCHG10_ABS_MIN) {
       noteGate('bandwidth-flat');
       blocked = true;
-    } else if (!redBar) {
-      noteGate('green-bar');
+    } else if (!greenBar) {
+      noteGate('no-bounce');
       blocked = true;
     } else if (pctb === null || pctb < PCTB_MIN || pctb > PCTB_MAX) {
       noteGate('pctb');
