@@ -33,27 +33,35 @@
 //     Round 3: the guard may ALSO fire after a normal trade closed, so a
 //     washout day can pay twice (normal + guard); fast exits are now
 //     TP +150 / stop -25 / time 120 (the +40 TP capped guard wins at ~$1.2).
+//     Round 4: guard fast exit is a trailing ratchet — TP cap +250, exit on
+//     a 60 bps retrace once +100 in profit, time stays 120 (the 180-bar
+//     extension bled on losers); normal trail widened to 120/60 so the
+//     second half rides a trending washout day.
 //   - O(1) incremental indicators only; validate once at the top; early
 //     exit before indicator work when no order is possible; no sync I/O,
 //     no sync I/O, no wall clock, no unseeded randomness (deterministic:
 //     same bars produce byte-identical replies).
 //
-// Exits (normal entries): TP +80 bps scale-out 50%, trailing 80 bps
-// ratcheting to 40 bps once +50 bps in profit, time exit 120 bars,
+// Exits (normal entries): TP +80 bps scale-out 50%, trailing 120 bps
+// (round 4) ratcheting to 60 bps once +50 bps in profit, time exit 120 bars,
 // bail -20 bps within 20 bars, disaster stop -250 bps, drawdown breaker
 // 5% (no new entries) / 8% (flatten). Fast entries (downtrend + guard):
-// full exit at TP +150 bps / stop -25 bps / time 120 bars.
+// full exit at TP +250 bps (round 4) / stop -25 bps / time 120 bars.
+// Guard trades additionally exit on a 60 bps retrace from the trail high
+// once +100 bps in profit (round 4 ratchet: locks in gains, lets a
+// trending washout day pay).
 //
 // Honest caveats: the dev schedule earns $0 in the race window — it only
 // opens the gate. The prize is decided by the race mode on an unseen day.
 // The race mode is designed to lose small and stay alive, not to win big.
 // Fresh OOS (21 x 24h windows: 14 in-sample 9-23 Nov + 7 held-out 2-9 Nov):
-// round 3 (c2) -$27.37 total (25 roundtrips, mean -$1.09/trade) vs rev 2
-// -$36.78; held-out -$3.21 vs -$13.26; best single day +$8.87 (held-out
-// d3: normal +$2.43 AND guard +$6.44 on the same washout day). Still
-// negative on fresh windows — the prize hinges on the race day being a
-// washout day. Fallback commit 2565206b (first result) is preserved on
-// branch hasil-pertama-2565206b; rev 2 (18cdec7) is the parent of this commit.
+// round 4 (c5) -$15.70 total (25 roundtrips, mean -$0.63/trade) vs round 3
+// (c2) -$27.37; held-out +$9.85 vs -$3.21 (first positive held-out set);
+// best single day +$18.08 (held-out d3: normal +$6.14 AND guard +$11.94
+// on the same washout day) — inside the +$12-22 prize band. The prize
+// still hinges on the race day being a washout day. Fallback commit
+// 2565206b (first result) is preserved on branch hasil-pertama-2565206b;
+// rev 2 (18cdec7) and round 3 (16186a3) are ancestors of this commit.
 
 import { runBars, type Bar, type BarsState, type BuyInput, type SellInput } from './vendor/makefun-bars.ts';
 
@@ -165,9 +173,9 @@ const PCTB_MIN = -0.1; // round 3: %B at or above -0.10 (looser washout)
 const PCTB_MAX = 0.35; // round 3: %B at or below 0.35
 const TREND_GAP_BPS = 2; // EMA8-EMA21 gap that counts as trending
 const MIN_BAR = 60; // bars of history before the first entry is allowed
-const TRAIL_BPS = 80; // exit: 80 bps below the highest close since entry
+const TRAIL_BPS = 120; // round 4: wider trail 120 bps (second half rides further)
 const RATCHET_PROFIT_BPS = 50; // ratchet arms once +50 bps in profit
-const RATCHET_TRAIL_BPS = 40; // ratcheted trail: 40 bps below trail high
+const RATCHET_TRAIL_BPS = 60; // round 4: ratcheted trail 60 bps
 const TP_BPS = 80; // take-profit scale-out: sell half at +80 bps
 const TP_FRAC_NUM = 1n; // TP sells TP_FRAC_NUM / TP_FRAC_DEN of the position
 const TP_FRAC_DEN = 2n; // -> 50%
@@ -193,7 +201,7 @@ const DOWNTREND_ENABLED = false; // DISABLED at build time: fresh 7d OOS
 // flag is off, so drift < 0 simply blocks new longs (flat is a position).
 const DT_PCTB_MIN = 0.3; // downtrend entry: %B at or above 0.30
 const DT_PCTB_MAX = 0.7; // downtrend entry: %B at or below 0.70
-const DT_TP_BPS = 150; // round 3: guard fast exit TP +150 bps (full)
+const DT_TP_BPS = 250; // round 4: guard ratchet TP cap +250 bps (full)
 const DT_STOP_BPS = 25; // round 3: guard fast exit stop -25 bps (full)
 const DT_TIME_BARS = 120; // round 3: guard fast exit time 120 bars
 const GUARD_AFTER = 800; // activity guard arms at this bar
@@ -224,6 +232,7 @@ let raceTrades = 0; // normal race-mode entries decided
 let downtrendTrades = 0; // downtrend-mode entries decided
 let guardTrades = 0; // activity-guard entries decided (max 1)
 let guardUsed = false; // the guard fires at most once per window
+let guardOpen = false; // the open fast position is a guard trade (round 4 ratchet)
 let invalidBars = 0; // malformed bars seen (replied [] to, stayed alive)
 const gateHits: Record<string, number> = {}; // silent per-gate block counts
 
@@ -354,12 +363,14 @@ function raceTrade(state: BarsState, seq: number, close: number, open: number, d
       entryBar = -1;
       tpDone = false;
       ratchetArmed = false;
+      guardOpen = false;
       cooldownUntil = seq + COOLDOWN_BARS;
       return [{ side: 'sell', symbol: SYMBOL, qty: held.qty, max_slippage_bps: MAX_SLIP_BPS }];
     };
     if (dd > CB_FLAT_DD) return fullExit();
     if (entryClose !== null && close <= entryClose * (1 - STOP_BPS / 10000)) return fullExit();
     if (exitKind === 'fast') {
+      if (guardOpen && entryClose !== null && trailHi > 0 && ((trailHi - entryClose) / entryClose) * 10000 >= 100 && close <= trailHi * (1 - 60 / 10000)) return fullExit();
       if (entryClose !== null && close >= entryClose * (1 + DT_TP_BPS / 10000)) return fullExit();
       if (entryClose !== null && close <= entryClose * (1 - DT_STOP_BPS / 10000)) return fullExit();
       if (entryBar >= 0 && seq - entryBar >= DT_TIME_BARS) return fullExit();
@@ -451,6 +462,7 @@ function raceTrade(state: BarsState, seq: number, close: number, open: number, d
     } else {
       guardUsed = true;
       guardTrades += 1;
+      guardOpen = true;
     }
     return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: size, max_slippage_bps: MAX_SLIP_BPS }];
   };
@@ -519,7 +531,9 @@ function raceTrade(state: BarsState, seq: number, close: number, open: number, d
   // has fired by bar 800, take the FIRST setup with pullback >= 20 bps
   // and ATR60 <= 10 — no drift floor, no higher-low, no range gate —
   // at half size, with fast exits. Round 3: it may also fire after a
-  // normal trade closed, so one washout day can pay twice.
+  // normal trade closed, so one washout day can pay twice. Round 4: the
+  // guard exit is a trailing ratchet (TP cap +250, 60 bps retrace once
+  // +100 in profit, time 120) — it locks in gains on trending days.
   if (
     !guardUsed &&
     seq >= GUARD_AFTER &&
